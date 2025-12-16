@@ -1,7 +1,7 @@
-#include <assert.h>
-#include <string.h>
 #include <stdio.h>
+#include <string.h>
 #include <sys/types.h>
+#include <stdint.h>
 #include <unistd.h>
 #include "my_malloc.h"
 
@@ -19,10 +19,17 @@ header* head = NULL;
 static inline void* get_payload(header* h){
     return (void*)((char*)h + sizeof(header));
 }
+static inline void* get_header(void* p){
+    return (void*)((char*)p - sizeof(header));
+}
+
+static void* heap_start = NULL;
 
 header* allocate(size_t size){
+    if(heap_start == NULL){
+        heap_start = sbrk(0);
+    }
     void* mem_raw = sbrk(size);
-    
     //sbrk returns (void*)-1 on failure
     if(mem_raw == (void*)-1){
         printf("sbrk failed to allocate memory \n");
@@ -114,40 +121,86 @@ void* my_malloc(size_t user_request_size){
             return NULL;
         }
 
-        header* new_free = (header*)((char*)new_chunk + req_total_size);
-        new_free->size = new_chunk->size - req_total_size;
-        new_free->isfree = 1;
-        new_free->next = NULL;
-
-        new_chunk->size = req_total_size;
         new_chunk->isfree = 0;
-        new_chunk->next = NULL;
-        slow->next = new_free;
         return get_payload(new_chunk);
     }
 }
 
-// lazy implementation; insert @ head
 void my_free(void* ptr){
     if(ptr == NULL){
         printf("Attempted to free a NULL pointer :(\n");
         return;
     }
-    header* block_header = (header*)((char*)ptr - sizeof(header));
-    block_header->isfree = 1;
+    header* trav = head;
+    header* slow = NULL;
+    header* to_free = get_header(ptr);
 
-    //add to free list
-    block_header->next = head;
-    head = block_header;
+    while(trav != NULL && trav < to_free){
+        slow = trav;
+        trav = trav->next;
+    }
+    if(slow == NULL){
+        head = to_free;
+        to_free->next = trav;
+    } else {
+        slow->next = to_free;
+        to_free->next = trav;
+    }
+    to_free->isfree = 1;
+
+    // coalease with next
+    if(trav != NULL && (char*)to_free + to_free->size == (char*)trav){
+        to_free->size += trav->size;
+        to_free->next = trav->next;
+    }
+    // coalease with previous
+    if(slow != NULL && (char*)slow + slow->size == (char*)to_free){
+        slow->size += to_free->size;
+        slow->next = to_free->next;
+    }
+}
+void* my_realloc(void* ptr, size_t size){
+    if(ptr == NULL){
+        return my_malloc(size);
+    }
+    header* old = get_header(ptr);
+    // already fits
+    if(old->size >= size + sizeof(header)){
+        return ptr;
+    }
+    void* new_ptr = my_malloc(size);
+    if(new_ptr == NULL){
+        printf("realloc failed to allocate memory \n");
+        return NULL;
+    }
+    memcpy(new_ptr, ptr, old->size - sizeof(header));
+    my_free(ptr);
+    return new_ptr;
+}
+
+void* my_calloc(size_t num, size_t size){
+    size_t total_size = num * size;
+    if(num !=0 && total_size / num != size){
+        printf("calloc overflow \n");
+        return NULL; // overflow
+    }
+    void* ptr = my_malloc(total_size);
+    if(ptr != NULL){
+        memset(ptr, 0, total_size);
+    }
+    return ptr; 
 }
 
 void print_free_list() {
     printf("--- Free List ---\n");
     header *curr = head;
     while (curr != NULL) {
-        // We cast to (void*) just to print the memory address nicely
-        printf("Addr: %p | Size: %zu | Next: %p\n", 
-               (void*)curr, curr->size, (void*)curr->next);
+        long offset = (char*)curr - (char*)heap_start;
+        printf("Addr: (%ld) 0x%lx | Size: %zu | Next: (%ld) 0x%lx\n", 
+               offset, offset, curr->size, 
+               curr->next ? (long)((char*)curr->next - (char*)heap_start) : -1,
+               curr->next ? (long)((char*)curr->next - (char*)heap_start) : 0);
+               
         curr = curr->next;
     }
     printf("-----------------\n");
